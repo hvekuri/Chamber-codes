@@ -1,22 +1,11 @@
-import pandas as pd
 import os
-import glob
+import pandas as pd
 import numpy as np
-from matplotlib import pyplot as plt
 import datetime as dt
-import math
-from scipy import stats
-from lmfit import Model, Parameters
-import matplotlib
+from matplotlib import pyplot as plt
+from chamber_tools import calc_flux, calc_NRMSE, calc_RMSE, linear_fit, exponential_fit, feksp, feksp_taylor, fGPP, fit_LR
+
 import JF_config as config
-#from JF_wrongtime_functions import get_co2_par2 as get_co2_par
-
-
-class Experiment:
-    def __init__(self, name, collar_area, gap):
-        self.name = name
-        self.collar_area = collar_area
-        self.gap = gap
 
 
 def read_licor(date):
@@ -28,10 +17,11 @@ def read_licor(date):
                                          'co2abs_min', 'co2abs_max', 'co2abs_med', 'h2o_avg', 'h2o_dev',
                                          'h2o_min', 'h2o_max', 'h2o_med', 'h2oabs_avg', 'h2oabs_dev',
                                          'h2oabs_min', 'h2oabs_max', 'h2oabs_med'])
-    licor = licor[["start_datetime", "co2_avg", "h2o_avg"]]
     licor = licor[1:]
-    licor.index = pd.to_datetime(
+    licor["start_datetime"] = pd.to_datetime(
         licor["start_datetime"], format="%Y-%m-%d %H:%M:%S")
+    licor.set_index("start_datetime", inplace=True)
+    licor = licor.astype(float)
     return licor
 
 
@@ -40,233 +30,99 @@ def read_rpi(date):
     rpi = pd.read_csv(filename, names=["TIME", "PAR(umol/m2/s)", "T(C)",
                                        "P(hPa)", "RH(%)", "Latitude(Lat)", "Longitude(Lon)", "Altitude(m)"])
     rpi = rpi[1:]
-    rpi.index = pd.to_datetime(
+    rpi["TIME"] = pd.to_datetime(
         rpi["TIME"], format="%Y-%m-%d %H:%M:%S")
+    rpi.set_index('TIME', inplace=True)
+    rpi = rpi.astype(float)
     return rpi
 
 
-# Returns lists of co2 and par between s(tart) and e(nd), timestaps (as in 13:08:16, 13:06:21..) amd seconds (0, 5, 10..)
-def get_co2_par(licor, rpi, s, e, a, b):
-    s = s.time()
-    e = e.time()
-    co2 = licor.between_time(s, e).co2_avg.values.astype(float)
-    co2 = a*co2+b  # Fix drift in gas analyzer
-    secs_lic = (licor.between_time(
-        s, e).index-licor.between_time(s, e).index[0]).seconds
-    timestamps_lic = licor.between_time(s, e).index.time
-    par = rpi.between_time(s, e)["PAR(umol/m2/s)"].values.astype(float)
-    secs_rpi = (rpi.between_time(
-        s, e).index-rpi.between_time(s, e).index[0]).seconds
-    timestamps_rpi = rpi.between_time(s, e).index.time
-
-    return co2, secs_lic, timestamps_lic, par, secs_rpi, timestamps_rpi
-
-
-# Chops 10s from the start of each measurement
-# While par_sd>config.par_sd_limit OR rmse>config.rmse_limit, chops 5s from the end of the measurement to find a "good" part of the measurement
-# Chopped measurement must be at least 60s long
-# Returns new start and end timestamps
-def find_good_meas(licor, rpi, s, e, drift_a, drift_b):
-    new_s = s+dt.timedelta(seconds=10)
-    new_e = e
-    co2, secs_lic, _, par, _, _ = get_co2_par(
-        licor, rpi, new_s, new_e, drift_a, drift_b)
-    # Uses rmse of exponential fit, can be changed here
-    if config.use_fit == 'exponential':
-        slope, nrmse, rmse, _ = exponential_fit(co2, secs_lic)
+def find_good_meas(cur_licor, cur_rpi, fit, drift_a, drift_b):
+    secs = (cur_licor.index-cur_licor.index[0]).seconds
+    co2 = drift_a*cur_licor.co2_avg+drift_b
+    if fit == 'linear':
+        slope, nrmse, rmse, co2_hat = linear_fit(co2, secs)
+        tang = np.nan
     else:
-        slope, nrmse, rmse, _ = linear_fit(
-            co2, secs_lic)
+        slope, nrmse, rmse, co2_hat = exponential_fit(
+            co2, secs)
+        tang = co2_hat[0]+slope*(secs)
 
-    while(np.std(par) > config.par_sd_limit or rmse > config.rmse_limit):
-        new_e = new_e-dt.timedelta(seconds=5)
-        if((new_e-new_s).total_seconds() < 60):
-            break
-        co2, secs_lic, ts_lic, par, secs_rpi, ts_rpi = get_co2_par(licor, rpi,
-                                                                   new_s, new_e, drift_a, drift_b)
+    if len(cur_licor) > 12:
+        i = 1
+        while np.std(cur_rpi["PAR(umol/m2/s)"]) > config.par_sd_limit or rmse > config.rmse_limit:
+            cur_licor = cur_licor[:len(cur_licor)-i*2]
+            cur_rpi = cur_rpi[:len(cur_rpi)-i]
+            secs = (cur_licor.index-cur_licor.index[0]).seconds
+            co2 = drift_a*cur_licor.co2_avg+drift_b
+            if fit == 'linear':
+                slope, nrmse, rmse, co2_hat = linear_fit(co2, secs)
+                tang = np.nan
+            else:
+                slope, nrmse, rmse, co2_hat = exponential_fit(co2, secs)
+                tang = co2_hat[0]+slope*(secs)
 
-        if config.use_fit == 'exponential':
-            slope, nrmse, rmse, _ = exponential_fit(co2, secs_lic)
-        else:
-            slope, nrmse, rmse, _ = linear_fit(
-                co2, secs_lic)
+            i += 1
+            if(len(cur_licor) <= 12):
+                break
 
-    return new_s, new_e
-
-
-def calc_NRMSE(x, y, y_hat):
-    y_min = min(y)
-    y_max = max(y)
-    sum = 0
-    for i in range(len(y)):
-        sum += (y_hat[i]-y[i])**2
-    return math.sqrt(1/(len(y))*sum)/(y_max-y_min)
+    return slope, nrmse, rmse, co2_hat, cur_licor, cur_rpi, tang
 
 
-def calc_RMSE(x, y, y_hat):
-    sum = 0
-    for i in range(len(y)):
-        sum += (y_hat[i]-y[i])**2
-    return math.sqrt(1/(len(y))*sum)
-
-
-# Does linear fitting, returns slope, nrmse, rmse and predicted co2
-def linear_fit(co2, secs_lic):
-    slope, intercept, r_value, p_value, std_err = stats.linregress(
-        secs_lic, co2)
-    co2_hat = intercept+slope*secs_lic
-    nrmse = calc_NRMSE(secs_lic, co2, co2_hat)
-    rmse = calc_RMSE(secs_lic, co2, co2_hat)
-    return slope, nrmse, rmse, co2_hat
-
-
-# Does exponential fitting first with 17th order taylor series to get initial guesses
-# Returns tangent's slope at s=0, nrmse, rmse and predicted co2
-def exponential_fit(co2, secs_lic):
-    co2_ = np.asarray(co2).reshape(-1, 1)
-    t = np.asarray(secs_lic).reshape(-1, 1)
-
-    # Fit Taylor series
-    fluxmodel_taylor = Model(feksp_taylor)
-    params_T = Parameters()
-    params_T.add_many(("a_T", 300), ("b_T", 300), ("c_T", -0.000002))
-    result_T = fluxmodel_taylor.fit(
-        co2_, secs=t, a=params_T["a_T"], b=params_T["b_T"], c=params_T["c_T"])
-
-    # Fit exponential model
-    fluxmodel = Model(feksp)
-    params = Parameters()
-    params.add_many(("a", result_T.params["a"].value),
-                    ("b", result_T.params["b"].value), ("c", result_T.params["c"].value))
-    result = fluxmodel.fit(co2_, secs=t, a=params["a"],
-                           b=params["b"], c=params["c"])
-    # print("Exponential fit result: ", result.fit_report())
-
-    a_fit = result.params["a"].value
-    b_fit = result.params["b"].value
-    c_fit = result.params["c"].value
-    slope = (b_fit-a_fit)*c_fit
-    co2_hat = feksp(secs_lic, a_fit, b_fit, c_fit)
-    nrmse = calc_NRMSE(secs_lic, co2, co2_hat)
-    rmse = calc_RMSE(secs_lic, co2, co2_hat)
-
-    return slope, nrmse, rmse, co2_hat
-
-
-def feksp(secs, a, b, c):
-    return a+(b-a)*np.exp(c*secs)
-
-
-def feksp_taylor(secs, a, b, c):
-    def ftaylorseries(c, x):
-        series = 0
-        for i in range(17):
-            series += (c**i*x**i)/math.factorial(i)
-        return series
-    return a+(b-a)*ftaylorseries(c, secs)
-
-
-def calc_flux(slope, pres, sysvol, temp, collar_area):
-    return slope * 44.01*pres*100 * sysvol/(8.31446*temp*collar_area)*0.001
-
-
-def fGPP(PAR, alpha, GPmax):
-    return alpha*GPmax*PAR/(alpha*PAR + GPmax)
-
-
-# Light response fitting
-def fit_LR(lr, lai, collar, experiment, date):
-    # Define the fit model
-    GPPmodel = Model(fGPP)
-
-    # Use Parameter class for model params; this makes it possible to set
-    # initial, max & min values for the param fit, or keep a fixed value
-    params = Parameters()
-    params.add_many(("alpha", -0.001, True, -0.1, 0.000000001), ("GPmax", -1,
-                                                                 True, -30, -0.000001))
-
-    # Fit
-    result = GPPmodel.fit(lr.GPP/lai, PAR=lr.PAR,
-                          alpha=params["alpha"], GPmax=params["GPmax"], method="leastsq")
-    # fig, ax = plt.subplots()
-    # ax.scatter(lr.PAR, lr.GPP/lai)
-    # plt.show()
-    # breakpoint()
-    #print("LR fit result: ", result.fit_report())
-
-    alpha_fit = result.params['alpha'].value
-    GPmax_fit = result.params['GPmax'].value
-    alpha_se = result.params['alpha'].stderr
-    GPmax_se = result.params['GPmax'].stderr
-
-    # Calculate the fitted function and 2-sigma uncertainty at arbitary x
-    xp = np.linspace(0, 2000)
-    GPP_fit = fGPP(xp, alpha_fit, GPmax_fit)
-
-    if(result.covar is not None):
-        GPP_unc = result.eval_uncertainty(sigma=1.96, PAR=xp)
-        GP1200 = lai*fGPP(1200, alpha_fit, GPmax_fit)
-        GP1200_unc = result.eval_uncertainty(sigma=1.96, PAR=1200)[0]
-    else:
-        GP1200, GP1200_unc = np.nan, np.nan
-
-    # Plot
-    if config.plotting:
-        fig, ax = plt.subplots()
-        if(result.covar is not None):
-            ax.fill_between(xp, GPP_fit-GPP_unc, GPP_fit +
-                            GPP_unc, alpha=0.5, color="grey")
-        ax.scatter(lr.PAR, lr.GPP/lai, c="black", s=6)
-        ax.plot(xp, GPP_fit, c="black")
-        ax.set_title("Collar " + collar)
-        ax.set_xlabel("PAR [$\mu$mol m$^-$$^2$ s$^-$$^1$]")
-        ax.set_ylabel("GPP [mg CO$_2$ m$^-$$^2$ s$^-$$^1$]")
-        ax.grid()
-        fig.savefig(config.results_path+experiment +
-                    "_LR_"+date+"_"+collar+".png")
-        plt.close()
-
-    return alpha_fit, alpha_se, GPmax_fit, GPmax_se, GP1200, GP1200_unc
-
-
-def plot_meas(date, collar, fig, i, or_ts_lic, or_co2, new_s, new_e, ts_lic, co2_hat, slope, secs_lic, rmse, or_ts_rpi, or_par, par):
+def plot_meas(fig, i, date, collar, orig_licor, orig_rpi, cur_licor, co2_hat, tang, cur_rpi, rmse, drift_a, drift_b):
     ax = fig.add_subplot(3, 2, i+1)
-
     ax.set_xlabel("t [s]", fontsize=6)
     ax.set_ylabel("CO$_2$ [ppm]", fontsize=6)
-    ax.scatter(or_ts_lic, or_co2,
+    ax.scatter(orig_licor.index.time, drift_a*orig_licor.co2_avg+drift_b,
                color="black", label="co2", s=3)
-    if(rmse > config.rmse_limit or np.std(par) > config.par_sd_limit):
+    if(rmse > config.rmse_limit or np.std(cur_rpi["PAR(umol/m2/s)"]) > config.par_sd_limit):
         c = "red"
     else:
         c = "black"
-    for t in [new_s.time(), new_e.time()]:
+    for t in [cur_licor.index[0].time(), cur_licor.index[len(cur_licor)-1].time()]:
         ax.axvline(t, c=c)
-    ax.plot(ts_lic, co2_hat, ls="--", c="red",
+    ax.plot(cur_licor.index.time, co2_hat, ls="--", c="k",
             label="Fit ("+config.use_fit+")")
     if config.use_fit == 'exponential':
-        tang = co2_hat[0]+slope*(secs_lic)
-        ax.plot(ts_lic, tang, c="green", label="Tangent")
+        ax.plot(cur_licor.index.time, tang, c="green", label="Tangent")
     ax.set_title("RMSE: "+str(round(rmse, 2))+" PAR sd: " +
-                 str(round(np.std(par), 2)), fontsize=6)
+                 str(round(np.std(cur_rpi["PAR(umol/m2/s)"]), 2)), fontsize=6)
     ax2 = ax.twinx()
-    ax2.plot(or_ts_rpi, or_par, c="darkblue", label="PAR")
-
+    ax2.plot(orig_rpi.index.time,
+             orig_rpi["PAR(umol/m2/s)"], c="darkblue", label="PAR")
     ax2.set_ylabel("PAR [$\mu$mol m$^-$$^2$ s$^-$$^1$]", fontsize=6)
     ax2.set_ylim(0, 2000)
     ax.legend(loc="upper left", prop={'size': 6})
     ax2.legend(loc="upper right", prop={'size': 6})
     ax.tick_params(axis='both', which='major', labelsize=6)
-    plt.suptitle("Date: "+str(date)+" Collar: " + collar)
+    plt.suptitle("Date: "+str(date)+" Collar: " + str(collar))
+
+    return fig
+
+
+def plot_LR(result, alpha, GPmax, lr, lai, collar, date):
+    fig, ax = plt.subplots()
+    xp = np.linspace(0, 2000)
+    GPP_fit = fGPP(xp, alpha, GPmax)
+    if(result.covar is not None):
+        GPP_unc = result.eval_uncertainty(sigma=1.96, PAR=xp)
+        ax.fill_between(xp, GPP_fit-GPP_unc, GPP_fit +
+                        GPP_unc, alpha=0.5, color="grey")
+    ax.scatter(lr.PAR, lr.GPP/lai, c="black", s=6)
+    ax.plot(xp, GPP_fit, c="black")
+    ax.set_title("Collar " + collar)
+    ax.set_xlabel("PAR [$\mu$mol m$^-$$^2$ s$^-$$^1$]")
+    ax.set_ylabel("GPP [mg CO$_2$ m$^-$$^2$ s$^-$$^1$]")
+    ax.grid()
+    plt.show()
+    fig.savefig(config.results_path+config.experiment +
+                "_LR_"+date+"_"+collar+".png")
+    plt.close()
 
 
 def main():
-    lai = pd.read_csv(config.lai_path, delimiter=",")
-    lai.Date = pd.to_datetime(lai.Date, format="%Y-%m-%d")
-    lai.set_index("Date", inplace=True)
-
+    # Read metadata
     metadata = pd.read_csv(config.metadata_path, delimiter=";")
-
     metadata.Date = pd.to_datetime(
         metadata.Date, format="%d.%m.%Y").dt.date
     cols = ["s1", "e1", "s2", "e2", "s3", "e3", "s4", "e4", "s5", "e5"]
@@ -280,143 +136,132 @@ def main():
     driftfix = pd.read_excel(config.drift_path)
     driftfix.Date = pd.to_datetime(driftfix.Date, format="%d.%m.%Y")
 
-    # Class for each experiment with name, collar area, gap in collar (not necessary if collars identical)
-    nurmi = Experiment("nurmi", 0.348, 0.025)
-    vilja = Experiment("vilja", 0.348, 0.025)
-    lajisto = Experiment("lajisto", 0.297, 0.035)
-    leikkuu = Experiment("leikkuu", 0.297, 0.035)
-
-    # Experiments to go through #, vilja, lajisto, leikkuu
-    experiments = [nurmi]
     z = 0
-    for experiment in experiments:
-        # Dataframe where all fluxes are stored (despite par sd and rmse)
-        all_fluxes = pd.DataFrame(columns=["Date", "Experiment", "Collar",
-                                           "PAR", "PAR_sd", "NEE", "NRMSE", "RMSE", "LAI", "Air_temp"])
-        lightresponse_results = pd.DataFrame(
-            columns=["Date", "Experiment", "Collar", "Alpha_fit", "Alpha_SE", "GPmax_fit", "GPmax_se", "GP1200", "GP1200unc", "Reco", "LAI", "Air_Temp"])
-        metadata_exp = metadata[metadata.Experiment == experiment.name]
-        dates = metadata_exp.Date.unique()
-        for date in dates:
 
+    # Dataframe where all fluxes are stored (despite par sd and rmse)
+    all_fluxes = pd.DataFrame(columns=["Date", "Experiment", "Collar", "Fit",
+                                       "PAR_median", "PAR_sd", "NEE [mg CO2 m-2 s-1]", "NRMSE", "RMSE", "LAI", "Temp"])
+    lightresponse_results = pd.DataFrame(
+        columns=["Date", "Experiment", "Collar", "alpha", "alpha_se", "GPmax", "GPmax_se", "GP1200", "GP1200unc", "Reco", "LAI", "Temp"])
+
+    for date in metadata.Date.unique():
+        # Constants for fixing drift on date
+        drift_a = driftfix[driftfix.Date == pd.Timestamp(date)].a.values[0]
+        drift_b = driftfix[driftfix.Date == pd.Timestamp(date)].b.values[0]
+
+        # Read data
+        licor = read_licor(str(date))
+        rpi = read_rpi(str(date))
+
+        # All measurements on date
+        cur_metadata = metadata[metadata.Date == date]
+
+        # One row = one collar
+        for idx, row in cur_metadata.iterrows():
+            print("Date: ", str(date), " Collar: ", str(row.Collar))
+            lr = pd.DataFrame(columns=["PAR", "NEE"])
+
+            # If use_LAI = False, GPP is scaled with LAI=1
             if config.use_LAI:
-                LAI = lai.loc[date, 'LAI_scaled']
+                LAI = row.LAI
             else:
                 LAI = 1
-            cur_metadata = metadata_exp[metadata_exp.Date == date]
-            drift_a = driftfix[driftfix.Date == pd.Timestamp(date)].a.values[0]
-            drift_b = driftfix[driftfix.Date == pd.Timestamp(date)].b.values[0]
-            licor = read_licor(str(date))
-            rpi = read_rpi(str(date))
 
-            for idx, row in cur_metadata.iterrows():
-                print("Date: ", str(date), " Collar: ", row.Collar)
+            for i in range(len(starts)):
+                if pd.isnull(row[starts[i]]):
+                    continue
+                # Original start and end of measurement
+                s = row[starts[i]].time()
+                e = row[ends[i]].time()
+                orig_licor = licor.between_time(s, e)
+                orig_rpi = rpi.between_time(s, e)
 
-                lr = pd.DataFrame(columns=["PAR", "NEE", "NRMSE", "PAR_sd"])
-                for i in range(len(starts)):
-                    if pd.isnull(row[starts[i]]):
-                        continue
+                # Remove 10s from the start of both files
+                cur_licor = orig_licor[2:]
+                cur_rpi = orig_rpi[1:]
 
-                    # Original start and end of measurement
-                    s = row[starts[i]]
-                    e = row[ends[i]]
+                # Try to find a good (par sd < par_sd_limit & rmse < rmse_limit) part of the measurement. Only chopped from end.
+                slope, nrmse, rmse, co2_hat, cur_licor, cur_rpi, tang = find_good_meas(
+                    cur_licor, cur_rpi, config.use_fit, drift_a, drift_b)
 
-                    or_co2, or_secs_lic, or_ts_lic, or_par, or_secs_rpi, or_ts_rpi = get_co2_par(licor, rpi,
-                                                                                                 s, e, drift_a, drift_b)
+                # Temperature, pressure and PAR
+                temp = np.median(cur_rpi["T(C)"]+273.15)
+                pres = np.median(cur_rpi["P(hPa)"])
+                par = np.median(cur_rpi["PAR(umol/m2/s)"])
 
-                    # Chopped "good" measurement
-                    new_s, new_e = find_good_meas(
-                        licor, rpi, s, e, drift_a, drift_b)
+                # If no temperature, air pressure or PAR, read it from metadata
+                if np.isnan(temp):
+                    temp = row["Temp (C)"]
+                    if np.isnan(temp):
+                        print("Temperature missing, fill in metadata. Date: " +
+                              str(date)+" Collar: "+str(row.Collar))
+                        exit()
+                if np.isnan(pres):
+                    pres = row["Air_pres (hPa)"]
+                    if np.isnan(pres):
+                        print("Air pressure missing, fill in metadata. Date: " +
+                              str(date)+" Collar: "+str(row.Collar))
+                        exit()
+                if np.isnan(par):
+                    par = row.PAR
+                    if np.isnan(par):
+                        print("PAR missing, fill in metadata. Date: " +
+                              str(date)+" Collar: "+str(row.Collar))
+                        exit()
 
-                    # breakpoint()
-                    co2, secs_lic, ts_lic, par, secs_rpi, ts_rpi = get_co2_par(licor, rpi,
-                                                                               new_s, new_e, drift_a, drift_b)
-                    # breakpoint()
-                    if config.kellovaarassa == True:
-                        print("JOUTUVAT LEIKKURIIN")
-                        licor_ix = (licor.index.time ==
-                                    ts_lic[len(ts_lic)-1]).argmax()
-                        licor = licor.iloc[licor_ix:, ]
-                        # breakpoint()
-                        rpi_ix = (rpi.index.time ==
-                                  ts_rpi[len(ts_rpi)-1]).argmax()
-                        rpi = rpi.iloc[rpi_ix:, ]
-                        # print(rpi)
-                        # print("JUHUU")
-                        # print(licor)
-                        # breakpoint()
-                    # breakpoint()
-                    temp = np.mean(rpi.between_time(new_s.time(), new_e.time())[
-                                   "T(C)"].values.astype(float)+273.15)
-                    pres = np.mean(rpi.between_time(new_s.time(), new_e.time())[
-                                   "P(hPa)"].values.astype(float))
-                    par_median = np.median(par)
+                # System volume, collar-gap + chamber
+                sysvol = config.collar_area * \
+                    (float(row.Collar_height) -
+                     config.gap)+row.Chamber_volume
 
-                    # If no temperature or pressure data
-                    if np.isnan(temp):  # FIX THIS
-                        temp = 293
-                    if np.isnan(pres):  # FIX THIS
-                        pres = 1000
+                # Calculate flux
+                flux = calc_flux(slope, pres, sysvol,
+                                 temp, config.collar_area)
 
-                    # System volume, collar-gap + chamber
-                    sysvol = experiment.collar_area * \
-                        (float(row.Collar_height)*0.01 -
-                         experiment.gap)+config.chamber_volume
+                # par < 5 -> NEE = Reco
+                if par < 5:
+                    par = 0
+                    resp = flux
 
-                    if config.use_fit == 'linear':
-                        # Linear fit
-                        slope, nrmse, rmse, co2_hat = linear_fit(
-                            co2, secs_lic)
-                        flux = calc_flux(slope, pres, sysvol,
-                                         temp, experiment.collar_area)
+                # Save fluxes to dataframe
+                all_fluxes.loc[z] = date, config.experiment, row.Collar, config.use_fit, par, np.std(
+                    par), flux, nrmse, rmse, row.LAI, temp
+                z += 1
 
-                    elif config.use_fit == 'exponential':
-                        # Exponential fit
-                        slope, nrmse, rmse, co2_hat = exponential_fit(
-                            co2, secs_lic)
-                        flux = calc_flux(slope, pres, sysvol,
-                                         temp, experiment.collar_area)
-                    else:
-                        print(
-                            "Check use_fit in config file! Must be exponential or linear.")
-                        break
+                # If rmse < rmse_limit and par sd > par_sd_limit, measurement is used for light response fitting
+                if(rmse < config.rmse_limit and np.std(par) < config.par_sd_limit):
+                    lr.loc[i] = par, flux
 
-                    if par_median < 5:
-                        resp = flux
-
-                    # Save fluxes
-                    all_fluxes.loc[z] = date, row.Experiment, row.Collar, par_median, np.std(
-                        par), flux, nrmse, rmse, row.LAI, temp
-                    z += 1
-
-                    if(rmse < config.rmse_limit and np.std(par) < config.par_sd_limit):
-                        lr.loc[i] = par_median, flux, nrmse, np.std(par)
-
-                    # Plot
-                    if config.plotting:
-                        if i == 0:
-                            fig = plt.figure(figsize=(8.0, 5.0))
-                        plot_meas(date, row.Collar, fig, i, or_ts_lic, or_co2, new_s, new_e,
-                                  ts_lic, co2_hat, slope, secs_lic, rmse, or_ts_rpi, or_par, par)
+                # Plot flux measurements
                 if config.plotting:
-                    fig.tight_layout()
-                    fig.savefig(config.results_path+experiment.name +
-                                "_"+str(date)+"_"+row.Collar+".png", dpi=100, bbox_inches='tight')
-                    plt.close()
-                lr["GPP"] = lr["NEE"]-resp  # GPP = NEE-R
+                    if i == 0:
+                        fig = plt.figure(figsize=(8.0, 5.0))
+                    fig = plot_meas(fig, i, date, row.Collar, orig_licor,
+                                    orig_rpi, cur_licor, co2_hat, tang, cur_rpi, rmse, drift_a, drift_b)
+            if config.plotting:
+                fig.tight_layout()
+                plt.show()
+                fig.savefig(config.results_path+config.experiment +
+                            "_"+str(date)+"_"+str(row.Collar)+".png", dpi=100, bbox_inches='tight')
+                plt.close()
 
-                if(len(lr) > 3):  # More than three points required for light response
-                    Alpha_fit, Alpha_se, GPmax_fit, GPmax_se, GP1200, GP1200unc = fit_LR(
-                        lr, LAI, str(row.Collar), experiment.name, str(date))
+            # Do light response fitting
+            lr["GPP"] = lr["NEE"]-resp  # GPP = NEE-R
+            if(len(lr) > 3):  # More than three points required for light response
+                alpha, alpha_se, GPmax, GPmax_se, GP1200, GP1200unc, result = fit_LR(
+                    lr, LAI, str(row.Collar), config.experiment, str(date), config.plotting)
+                lightresponse_results.loc[idx] = date, config.experiment, row.Collar, alpha, alpha_se, GPmax, GPmax_se, GP1200, GP1200unc, resp, LAI, temp
 
-                    # Save parameters
-                    lightresponse_results.loc[idx] = date, experiment.name, row.Collar, Alpha_fit, Alpha_se, GPmax_fit, GPmax_se, GP1200, GP1200unc, resp, LAI, temp
+                # Plot light response
+                if config.plotting:
+                    plot_LR(result, alpha, GPmax, lr, LAI,
+                            str(row.Collar), str(date))
 
-        print(lightresponse_results)
-        lightresponse_results.to_csv(
-            config.results_path+"LR_"+experiment.name+".csv", index=False)
-        all_fluxes.to_csv(config.results_path+experiment.name +
-                          ".csv", index=False)
+    # Save results as csv-files
+    lightresponse_results.to_csv(
+        config.results_path+"LR_"+config.experiment+".csv", index=False)
+    all_fluxes.to_csv(config.results_path+"Fluxes_"+config.experiment +
+                      ".csv", index=False)
 
 
 if __name__ == "__main__":
