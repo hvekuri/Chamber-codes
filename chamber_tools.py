@@ -6,6 +6,11 @@ from lmfit import Model, Parameters
 
 
 def calc_flux(slope, pres, sysvol, temp, collar_area):
+    # pres in [hPa]
+    # sysol in [m3]
+    # temp in [K]
+    # collar_area in [m2]
+    # -> returns flux in [mg m-2 s-1]
     return slope * 44.01*pres*100 * sysvol/(8.31446*temp*collar_area)*0.001
 
 
@@ -47,7 +52,6 @@ def exponential_fit(co2, secs_lic):
                     ("b", result_T.params["b"].value), ("c", result_T.params["c"].value))
     result = fluxmodel.fit(co2_, secs=t, a=params["a"],
                            b=params["b"], c=params["c"])
-    # print("Exponential fit result: ", result.fit_report())
 
     a_fit = result.params["a"].value
     b_fit = result.params["b"].value
@@ -75,34 +79,3 @@ def feksp_taylor(secs, a, b, c):
 
 def fGPP(PAR, alpha, GPmax):
     return alpha*GPmax*PAR/(alpha*PAR + GPmax)
-
-
-# Light response fitting
-def fit_LR(lr, lai, collar, experiment, date, plotting):
-    # Define the fit model
-    GPPmodel = Model(fGPP)
-
-    # Use Parameter class for model params; this makes it possible to set
-    # initial, max & min values for the param fit, or keep a fixed value
-    params = Parameters()
-    params.add_many(("alpha", -0.001, True, -0.1, 0.000000001), ("GPmax", -1,
-                                                                 True, -30, -0.000001))
-
-    # Fit
-    result = GPPmodel.fit(lr.GPP/lai, PAR=lr.PAR,
-                          alpha=params["alpha"], GPmax=params["GPmax"], method="leastsq")
-
-    alpha_fit = result.params['alpha'].value
-    GPmax_fit = result.params['GPmax'].value
-    alpha_se = result.params['alpha'].stderr
-    GPmax_se = result.params['GPmax'].stderr
-
-    # Calculate the fitted function and 2-sigma uncertainty at arbitary x
-
-    if(result.covar is not None):
-        GP1200 = lai*fGPP(1200, alpha_fit, GPmax_fit)
-        GP1200_unc = result.eval_uncertainty(sigma=1.96, PAR=1200)[0]
-    else:
-        GP1200, GP1200_unc = np.nan, np.nan
-
-    return alpha_fit, alpha_se, GPmax_fit, GPmax_se, GP1200, GP1200_unc, result

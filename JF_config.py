@@ -21,7 +21,7 @@ rmse_limit = 1  # If RMSE is greater than this, flux is not used for LR fitting,
 #nrmse_limit = 0.05
 
 # Plotting
-plotting = True  # If False, no plots are shown
+plotting = True  # If False, no plots are made
 
 # Use exponential or linear fits for light response curves, "exponential"/"linear"
 use_fit = "exponential"
@@ -33,3 +33,7 @@ results_path = "/JF_example_files/"
 collar_area = 0.348
 # Gap in collar in m
 gap = 0.035
+
+# Bounds for parameters: min, max
+alpha_bounds = -0.1, -0.00000001
+GPmax_bounds = -5, -0.0000001

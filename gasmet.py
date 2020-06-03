@@ -9,7 +9,13 @@ import gasmet_config as config
 
 
 def calc_flux(slope, pres, sysvol, temp, collar_area, MM):
-    return slope * MM*pres*100 * sysvol/(8.31446*temp*collar_area)*0.001
+    # pres in [hPa]
+    # sysol in [m3]
+    # temp in [K]
+    # collar_area in [m2]
+    # MM in [g/mol]
+    # -> returns flux in [mg m-2 s-1]
+    return slope*MM*pres*100*sysvol/(8.31446*temp*collar_area)*0.001
 
 
 def get_temperature(date, starttime, endtime):
