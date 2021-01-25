@@ -79,3 +79,7 @@ def feksp_taylor(secs, a, b, c):
 
 def fGPP(PAR, alpha, GPmax):
     return alpha*GPmax*PAR/(alpha*PAR + GPmax)
+
+
+def fNEE(PAR, alpha, GPmax, R):
+    return (alpha*GPmax*PAR/(alpha*PAR + GPmax))+R

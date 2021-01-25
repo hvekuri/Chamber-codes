@@ -1,4 +1,4 @@
-﻿Experiment;Date;Collar;Start;End;Obs;Chamber_volume;Collar_height;Temp;Air_pres
+﻿Experiment;Date;Collar;Start;End;Obs;Chamber_volume [m3];Collar_height [m];Temp [C];Air_pres [hPa]
 leikkuu;3.6.2019;1;10:24:30;10:34:42;;0.2736;0.183445122;20;1000
 leikkuu;3.6.2019;2;10:36:54;10:45:00;;0.2736;0.161859756;20;1000
 leikkuu;3.6.2019;3;10:46:54;10:55:00;;0.2736;0.138371951;20;1000

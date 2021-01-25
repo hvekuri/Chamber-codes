@@ -82,8 +82,8 @@ if __name__ == "__main__":
                     temp = get_temperature(
                         date.strftime("%Y%m%d"), S, E)+273.15
                 except OSError:
-                    temp = row.Temp+273.15
-                pres = row.Air_pres
+                    temp = row["Temp [C]"]+273.15
+                pres = row["Air_pres [hPa]"]
 
                 if np.isnan(pres) or np.isnan(temp):
                     print("Temperature or pressure missing. Fill in metadata. Date: " +
@@ -91,8 +91,8 @@ if __name__ == "__main__":
                     exit()
 
                 sysvol = config.collar_area * \
-                    (float(row.Collar_height) -
-                     config.gap)+row.Chamber_volume
+                    (float(row["Collar_height [m]"]) -
+                     config.gap)+row["Chamber_volume [m3]"]
                 lin_slope, lin_nrmse, lin_rmse, lin_co2_hat = linear_fit(
                     gas_ppm, secs)
                 lin_flux = calc_flux(lin_slope, pres, sysvol,
